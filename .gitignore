@@ -1,0 +1,24 @@
+# Bağımlılıklar ve derleme çıktıları
+node_modules/
+dist/
+.vite/
+
+# Yerel paket önbellekleri ve günlükler
+.npm-cache/
+.pnpm-store/
+npm-debug.log*
+pnpm-debug.log*
+*.log
+
+# Yerel yapılandırma ve gizli bilgiler
+.env
+.env.*
+!.env.example
+
+# Kullanıcının dışa aktardığı yerel veri yedekleri
+denge-yedek-*.json
+
+# İşletim sistemi / editör dosyaları
+.DS_Store
+Thumbs.db
+.vscode/
