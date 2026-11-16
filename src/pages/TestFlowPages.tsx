@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { CameraView } from '../camera/CameraView'
 import { AppHeader } from '../components/AppHeader'
 import { PersonnelRepository, TestResultRepository } from '../db/database'
@@ -29,14 +29,29 @@ export function CameraAnalysisPage({ personnel, exerciseType, settings, onBack, 
 
 export function TestSummaryPage({ personnel, exerciseType, repetitionCount, date, onRetry, onCancel }: { personnel: Personnel; exerciseType: ExerciseType; repetitionCount: number; date: string; onRetry: () => void; onCancel: () => void }) {
   const [saved, setSaved] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const inFlight = useRef(false)
+  const [resultId] = useState(() => crypto.randomUUID())
   const save = async () => {
-    if (saved) return
-    await TestResultRepository.save({ id: crypto.randomUUID(), personnelId: personnel.id, exerciseType, repetitionCount, date })
-    setSaved(true)
+    if (saved || inFlight.current) return
+    inFlight.current = true
+    setSaving(true)
+    setError('')
+    try {
+      await TestResultRepository.save({ id: resultId, personnelId: personnel.id, exerciseType, repetitionCount, date })
+      setSaved(true)
+    } catch {
+      setError('Sonuç kaydedilemedi. Tekrar deneyin.')
+    } finally {
+      inFlight.current = false
+      setSaving(false)
+    }
   }
   const formatted = new Intl.DateTimeFormat('tr-TR', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(date))
   return <main className="page"><AppHeader title="TEST SONUCU" />
     <section className="card stack"><strong>PERSONEL</strong><span>{personnel.rutbe} {personnel.ad} {personnel.soyad}</span><strong>HAREKET</strong><span>{exerciseTitle[exerciseType]}</span><strong>SONUÇ</strong><div className="result-number">{repetitionCount}</div><span>TEKRAR</span><strong>TARİH</strong><span>{formatted}</span></section>
-    <div className="stack"><button className="button" disabled={saved} onClick={() => void save()}>{saved ? 'KAYDEDİLDİ' : 'KAYDET'}</button><button className="button secondary" onClick={onRetry}>TEKRARLA</button><button className="button secondary" onClick={onCancel}>İPTAL</button></div>
+    {error && <p role="alert">{error}</p>}
+    <div className="stack"><button className="button" disabled={saved || saving} onClick={() => void save()}>{saved ? 'KAYDEDİLDİ' : saving ? 'KAYDEDİLİYOR…' : 'KAYDET'}</button><button className="button secondary" disabled={saving} onClick={onRetry}>TEKRARLA</button><button className="button secondary" disabled={saving} onClick={onCancel}>İPTAL</button></div>
   </main>
 }
