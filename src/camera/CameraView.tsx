@@ -14,7 +14,7 @@ interface CameraViewProps {
   onFinish: (repetitions: number) => void
 }
 
-type CameraState = 'loading' | 'ready' | 'permissionDenied' | 'error'
+type CameraState = 'loading' | 'ready' | 'paused' | 'permissionDenied' | 'error'
 
 export function CameraView({ exerciseType, settings, onFinish }: CameraViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -23,6 +23,7 @@ export function CameraView({ exerciseType, settings, onFinish }: CameraViewProps
   const detectorRef = useRef<BrowserPoseDetector | null>(null)
   const animationRef = useRef<number | null>(null)
   const stoppedRef = useRef(false)
+  const generationRef = useRef(0)
   const formRef = useRef<FormAnalysisResult>({ overallState: 'UNKNOWN', jointStates: {}, segmentStates: {}, detectedIssues: [] })
   const repetitionRef = useRef(0)
   const [state, setState] = useState<CameraState>('loading')
@@ -31,6 +32,7 @@ export function CameraView({ exerciseType, settings, onFinish }: CameraViewProps
   const [form, setForm] = useState<FormAnalysisResult>({ overallState: 'UNKNOWN', jointStates: {}, segmentStates: {}, detectedIssues: [] })
 
   const stop = useCallback(() => {
+    generationRef.current += 1
     stoppedRef.current = true
     if (animationRef.current !== null) cancelAnimationFrame(animationRef.current)
     animationRef.current = null
@@ -38,11 +40,14 @@ export function CameraView({ exerciseType, settings, onFinish }: CameraViewProps
     streamRef.current = null
     detectorRef.current?.close()
     detectorRef.current = null
+    if (videoRef.current) videoRef.current.srcObject = null
   }, [])
 
   const start = useCallback(async () => {
     stop()
     stoppedRef.current = false
+    const generation = generationRef.current
+    const isCurrent = () => generation === generationRef.current && !stoppedRef.current
     setState('loading')
     setMessage('Kamera hazırlanıyor…')
     try {
@@ -53,17 +58,20 @@ export function CameraView({ exerciseType, settings, onFinish }: CameraViewProps
         video: { facingMode: { ideal: settings.facingMode }, width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: false,
       })
-      if (stoppedRef.current) { stream.getTracks().forEach((track) => track.stop()); return }
+      if (!isCurrent()) { stream.getTracks().forEach((track) => track.stop()); return }
       streamRef.current = stream
       const video = videoRef.current
-      if (!video) return
+      if (!video) { stop(); return }
       video.srcObject = stream
       await video.play()
-      detectorRef.current = await BrowserPoseDetector.create()
-      if (stoppedRef.current) return
+      if (!isCurrent()) return
+      const detector = await BrowserPoseDetector.create()
+      if (!isCurrent()) { detector.close(); return }
+      detectorRef.current = detector
       setState('ready')
 
       const analyzer = createExerciseAnalyzer(exerciseType)
+      const completedRepetitions = repetitionRef.current
       const formAnalyzer = createFormAnalyzer(exerciseType)
       const smoother = new PoseSmoother(exerciseConfig.poseSmoothingFrames)
       const debouncer = new FormStateDebouncer()
@@ -75,7 +83,7 @@ export function CameraView({ exerciseType, settings, onFinish }: CameraViewProps
       const interval = 1000 / exerciseConfig.analysisFPS
 
       const loop = (now: number) => {
-        if (stoppedRef.current || !videoRef.current || !canvasRef.current || !detectorRef.current) return
+        if (!isCurrent() || !videoRef.current || !canvasRef.current || !detectorRef.current) return
         const activeVideo = videoRef.current
         if (activeVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && activeVideo.currentTime !== lastVideoTime && now - lastInference >= interval) {
           lastVideoTime = activeVideo.currentTime
@@ -88,8 +96,8 @@ export function CameraView({ exerciseType, settings, onFinish }: CameraViewProps
             currentForm = nextForm
             formRef.current = nextForm
             missingSince = null
-            repetitionRef.current = analyzer.repetitionCount
-            setRepetitions((previous) => previous === analyzer.repetitionCount ? previous : analyzer.repetitionCount)
+            repetitionRef.current = completedRepetitions + analyzer.repetitionCount
+            setRepetitions(repetitionRef.current)
             setForm((previous) => previous.overallState === nextForm.overallState ? previous : nextForm)
             setMessage(nextForm.overallState === 'CORRECT' ? 'DURUŞ UYGUN' : nextForm.overallState === 'INCORRECT' ? 'DURUŞU DÜZELT' : 'KONUMLANMANIZI DÜZELTİN')
           } else {
@@ -108,6 +116,7 @@ export function CameraView({ exerciseType, settings, onFinish }: CameraViewProps
       }
       animationRef.current = requestAnimationFrame(loop)
     } catch (error) {
+      if (!isCurrent()) return
       const errorName = error instanceof DOMException ? error.name : ''
       setState(errorName === 'NotAllowedError' ? 'permissionDenied' : 'error')
       setMessage(errorName === 'NotAllowedError' ? 'Kamera izni gereklidir.' : error instanceof Error ? error.message : 'Kamera başlatılamadı.')
@@ -117,7 +126,13 @@ export function CameraView({ exerciseType, settings, onFinish }: CameraViewProps
 
   useEffect(() => { void start(); return stop }, [start, stop])
   useEffect(() => {
-    const onVisibilityChange = () => { if (document.hidden) stop() }
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        stop()
+        setState('paused')
+        setMessage('Kamera duraklatıldı. Devam etmek için kamerayı yeniden açın.')
+      }
+    }
     document.addEventListener('visibilitychange', onVisibilityChange)
     return () => document.removeEventListener('visibilitychange', onVisibilityChange)
   }, [stop])
@@ -133,6 +148,7 @@ export function CameraView({ exerciseType, settings, onFinish }: CameraViewProps
     </div>
     <div className={`status ${form.overallState === 'CORRECT' ? 'status-correct' : form.overallState === 'INCORRECT' ? 'status-incorrect' : 'status-unknown'}`}>{message}</div>
     {(state === 'permissionDenied' || state === 'error') && <button className="button secondary" onClick={() => void start()}>Kamera İznini Tekrar Dene</button>}
+    {state === 'paused' && <button className="button secondary" onClick={() => void start()}>Kamerayı Yeniden Aç</button>}
     <button className="button danger" onClick={finish}>BİTİR</button>
   </>
 }

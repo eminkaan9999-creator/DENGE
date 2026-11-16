@@ -62,18 +62,40 @@ export async function restoreBackup(input: unknown): Promise<{ personnelAdded: n
   if (!input || typeof input !== 'object') throw new Error('Geçersiz yedek dosyası.')
   const data = input as Partial<{ personnel: Personnel[]; results: TestResult[] }>
   if (!Array.isArray(data.personnel) || !Array.isArray(data.results)) throw new Error('Geçersiz yedek dosyası.')
-  const existingPeople = await PersonnelRepository.all()
-  const existingResults = await TestResultRepository.all()
-  const personIds = new Set(existingPeople.map((item) => item.id))
-  const resultIds = new Set(existingResults.map((item) => item.id))
-  const newPeople = data.personnel.filter((item) => validPersonnel(item) && !personIds.has(item.id))
-  const newResults = data.results.filter((item) => validResult(item) && !resultIds.has(item.id))
-  await PersonnelRepository.saveMany(newPeople)
+  if (!data.personnel.every(validPersonnel) || !data.results.every(validResult)) throw new Error('Yedekte geçersiz kayıt var.')
   const db = await database
-  const tx = db.transaction('results', 'readwrite')
-  await Promise.all(newResults.map((item) => tx.store.add(item)))
-  await tx.done
-  return { personnelAdded: newPeople.length, resultsAdded: newResults.length }
+  const tx = db.transaction(['personnel', 'results'], 'readwrite')
+  const done = tx.done
+  // Attach a rejection handler before requests can abort the transaction.
+  void done.catch(() => undefined)
+  try {
+    const peopleStore = tx.objectStore('personnel')
+    const resultsStore = tx.objectStore('results')
+    const [peopleKeys, resultKeys] = await Promise.all([peopleStore.getAllKeys(), resultsStore.getAllKeys()])
+    const personIds = new Set(peopleKeys)
+    const resultIds = new Set(resultKeys)
+    const newPeople = data.personnel.filter((item) => {
+      if (personIds.has(item.id)) return false
+      personIds.add(item.id)
+      return true
+    })
+    const newResults = data.results.filter((item) => {
+      if (resultIds.has(item.id)) return false
+      if (!personIds.has(item.personnelId)) throw new Error('Sonucun personel kaydı bulunamadı.')
+      resultIds.add(item.id)
+      return true
+    })
+    await Promise.all([
+      ...newPeople.map((item) => peopleStore.add(item)),
+      ...newResults.map((item) => resultsStore.add(item)),
+    ])
+    await done
+    return { personnelAdded: newPeople.length, resultsAdded: newResults.length }
+  } catch (error) {
+    try { tx.abort() } catch { /* The transaction may already have aborted. */ }
+    await done.catch(() => undefined)
+    throw error
+  }
 }
 
 function sortResults(results: TestResult[]): TestResult[] {
@@ -82,10 +104,18 @@ function sortResults(results: TestResult[]): TestResult[] {
 
 function validPersonnel(value: unknown): value is Personnel {
   const person = value as Personnel
-  return Boolean(person?.id && person.ad?.trim() && person.soyad?.trim())
+  return Boolean(nonEmptyString(person?.id) && nonEmptyString(person?.ad) && nonEmptyString(person?.soyad) &&
+    [person?.sicilNo, person?.rutbe, person?.birlik].every((field) => field === undefined || typeof field === 'string'))
 }
 
 function validResult(value: unknown): value is TestResult {
   const result = value as TestResult
-  return Boolean(result?.id && result.personnelId && result.exerciseType && Number.isInteger(result.repetitionCount) && result.date)
+  return Boolean(nonEmptyString(result?.id) && nonEmptyString(result?.personnelId) &&
+    ['pushUp', 'sitUp', 'pullUp'].includes(result?.exerciseType) &&
+    Number.isSafeInteger(result?.repetitionCount) && result.repetitionCount >= 0 &&
+    nonEmptyString(result?.date) && Number.isFinite(Date.parse(result.date)))
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
 }
